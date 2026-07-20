@@ -1,0 +1,248 @@
+name: vexa-stack
+
+# Indicia vexa-stack — capture-only deploy van Vexa (Teams-meeting-bots) voor Vector.
+# Besluit en context: ADR-0004 in de vector-repo (docs/adr/0004-teams-bot-vexa.md).
+#
+# Afgeleid van upstream deploy/compose/docker-compose.yml @ v0.12.15 (Apache-2.0,
+# github.com/Vexa-ai/vexa). Bewust weggelaten t.o.v. upstream:
+#   - transcriptie (TRANSCRIBE_ENABLED=false): audio gaat als artifact naar MinIO en
+#     wordt door Vector's eigen pipeline getranscribeerd — geen STT op deze CPU-VPS;
+#   - agent-api / agent-worker / mcp / terminal / dashboard: copilot- en UI-diensten
+#     van upstream, niet nodig voor capture-only.
+# De bot is GEEN compose-service: runtime spawnt ${BROWSER_IMAGE} per meeting via de
+# gemounte docker-socket, op het vaste netwerk `vexa-stack` (zie DOCKER_NETWORK).
+# Vereist Docker engine >= 26.
+
+services:
+  # ─── Infrastructuur ─────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    volumes:
+      - redis-data:/data
+    networks: [vexa]
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17-alpine
+    command: ["postgres", "-c", "idle_in_transaction_session_timeout=60000"]
+    environment:
+      - POSTGRES_DB=${DB_NAME:-vexa}
+      - POSTGRES_USER=${DB_USER:-postgres}
+      - POSTGRES_PASSWORD=${DB_PASSWORD:-postgres}
+      # Upstream draait volledig op UTC; DB-klok vastpinnen zodat server-side
+      # timestamps gegarandeerd UTC zijn.
+      - TZ=UTC
+      - PGTZ=UTC
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5458}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-vexa}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks: [vexa]
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY:-vexa-access-key}
+      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY:-vexa-secret-key}
+    ports:
+      - "127.0.0.1:${MINIO_HOST_PORT:-9000}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_HOST_PORT:-9001}:9001"
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local || curl -sf http://localhost:9000/minio/health/live || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - minio-data:/data
+    networks: [vexa]
+    restart: unless-stopped
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        mc alias set vexa http://minio:9000 $${MINIO_ROOT_USER:-vexa-access-key} $${MINIO_ROOT_PASSWORD:-vexa-secret-key}
+        mc mb --ignore-existing vexa/${MINIO_BUCKET:-vexa}
+        exit 0
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY:-vexa-access-key}
+      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY:-vexa-secret-key}
+    networks: [vexa]
+
+  # ─── Kerndiensten (gepubliceerde images, gepind via IMAGE_TAG) ──────────────
+  admin-api:
+    image: vexaai/v012-admin-api:${IMAGE_TAG:?pin IMAGE_TAG in .env}
+    ports:
+      - "127.0.0.1:${ADMIN_API_PORT:-18057}:8001"
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME:-vexa}
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-postgres}
+      - ADMIN_API_TOKEN=${ADMIN_TOKEN:?set ADMIN_TOKEN in .env}
+      - INTERNAL_API_SECRET=${INTERNAL_API_SECRET:?set INTERNAL_API_SECRET in .env}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8001/health').status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    init: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [vexa]
+    restart: unless-stopped
+
+  runtime:
+    image: vexaai/v012-runtime:${IMAGE_TAG:?pin IMAGE_TAG in .env}
+    # Spawnt bot-containers via de host-docker-socket. Let op: socket-toegang is
+    # root-equivalent op de host — zie de risico-paragraaf in de README.
+    group_add:
+      - "${DOCKER_GID:-0}"
+    ports:
+      - "127.0.0.1:${RUNTIME_API_PORT:-18090}:8090"
+    environment:
+      - BROWSER_IMAGE=${BROWSER_IMAGE:?pin BROWSER_IMAGE in .env}
+      # Agent-workers gebruiken we niet (geen agent-api in deze stack); gepind
+      # zodat de runtime nooit op een zwevende :dev-tag terugvalt.
+      - AGENT_IMAGE=vexaai/v012-agent-api:${IMAGE_TAG}
+      - AGENT_WORKER_IMAGE=vexaai/v012-agent-worker:${IMAGE_TAG}
+      - REDIS_URL=redis://redis:6379/0
+      - INTERNAL_API_SECRET=${INTERNAL_API_SECRET}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      # Vast netwerknaam (zie networks: onderaan) zodat gespawnde bots meeting-api
+      # en redis kunnen bereiken, ongeacht hoe de deployer het compose-project noemt.
+      - DOCKER_NETWORK=vexa-stack
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8090/health').status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    init: true
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks: [vexa]
+    restart: unless-stopped
+
+  meeting-api:
+    image: vexaai/v012-meeting-api:${IMAGE_TAG:?pin IMAGE_TAG in .env}
+    ports:
+      - "127.0.0.1:${MEETING_API_PORT:-18080}:8080"
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME:-vexa}
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-postgres}
+      - REDIS_URL=redis://redis:6379/0
+      - RUNTIME_API_URL=http://runtime:8090
+      - INTERNAL_API_SECRET=${INTERNAL_API_SECRET}
+      - DEFAULT_BOT_NAME=${DEFAULT_BOT_NAME:-}
+      # Nodig voor de agenda-sync-sweep (ICS) en de per-user bot-limieten.
+      - ADMIN_API_URL=http://admin-api:8001
+      - ADMIN_TOKEN=${ADMIN_TOKEN}
+      # Capture-only: geen STT-dienst; expliciet false zodat een standaard
+      # POST /bots capture-only bots spawnt in plaats van te 503'en.
+      - TRANSCRIPTION_SERVICE_URL=
+      - TRANSCRIPTION_SERVICE_TOKEN=
+      - TRANSCRIPTION_MODEL=
+      - TRANSCRIBE_ENABLED=false
+      - RECORDING_ENABLED=true
+      # Anonieme gast-join (default). Authenticated-bot-mode bestaat upstream
+      # (BOT_AUTHENTICATED + userdata-S3) — pas inzetten als de tenant anonieme
+      # join blokkeert; zie upstream docs /authenticated-bots.
+      - BOT_AUTHENTICATED=false
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT:-minio:9000}
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-vexa-access-key}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-vexa-secret-key}
+      - MINIO_BUCKET=${MINIO_BUCKET:-vexa}
+      - MINIO_SECURE=${MINIO_SECURE:-false}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health').status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    init: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      runtime:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    networks: [vexa]
+    restart: unless-stopped
+
+  gateway:
+    image: vexaai/v012-gateway:${IMAGE_TAG:?pin IMAGE_TAG in .env}
+    ports:
+      - "127.0.0.1:${API_GATEWAY_HOST_PORT:-18056}:8000"
+    environment:
+      - ADMIN_API_URL=http://admin-api:8001
+      - MEETING_API_URL=http://meeting-api:8080
+      - REDIS_URL=redis://redis:6379/0
+      - INTERNAL_API_SECRET=${INTERNAL_API_SECRET}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      # Edge guard (per-IP rate limit + auto-ban) op upstream-defaults; de poort
+      # bindt alleen op 127.0.0.1, dus dit is een tweede slot, geen voordeur.
+      - GUARD_ENABLED=${GUARD_ENABLED:-true}
+      - GUARD_ENABLE_REDIS=true
+      - GUARD_RATE_LIMIT_RPM=${GUARD_RATE_LIMIT_RPM:-600}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    init: true
+    depends_on:
+      admin-api:
+        condition: service_healthy
+      meeting-api:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks: [vexa]
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+  postgres-data:
+  minio-data:
+
+networks:
+  vexa:
+    driver: bridge
+    # Vaste naam (geen projectprefix): runtime geeft deze naam aan gespawnde
+    # bot-containers door (DOCKER_NETWORK) en mag niet afhangen van de
+    # projectnaam die Dokploy of een operator kiest.
+    name: vexa-stack
