@@ -1,0 +1,76 @@
+# Release-pipeline conform de teamstandaard (kennisbank dokploy-deploy), met één
+# afwijking: er wordt niets gebouwd. De stack draait gepubliceerde upstream-images
+# (Vexa, Apache-2.0); de "build"-stap is hier een MIRROR — de gepinde upstream-tags
+# worden manifest-voor-manifest naar onze GHCR gekopieerd (docker buildx imagetools,
+# geen rebuild), waarna de deploy-job op de ecom-runner de Dokploy-webhook aanroept.
+#
+# Versie bumpen = de ${IMAGE_TAG:-…}-defaults in docker-compose.yml aanpassen,
+# committen op main, en een release-tag X.Y.Z pushen.
+name: Deploy
+
+on:
+  push:
+    tags: ["*.*.*"]
+  workflow_dispatch:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: "Guard: tag moet op main staan"
+        if: github.ref_type == 'tag'
+        run: |
+          git fetch origin main --quiet
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
+            || { echo "::error::Tag staat niet op main"; exit 1; }
+      - name: Validate compose config
+        env:
+          ADMIN_TOKEN: ci-dummy
+          INTERNAL_API_SECRET: ci-dummy
+        run: docker compose -f docker-compose.yml config --quiet
+
+  mirror:
+    needs: checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Mirror gepinde upstream-images naar GHCR
+        env:
+          ADMIN_TOKEN: ci-dummy
+          INTERNAL_API_SECRET: ci-dummy
+        run: |
+          set -euo pipefail
+          # De te mirroren images komen uit de compose-config zelf (single source
+          # of truth): alle ghcr.io-refs van services + het bot-image dat de
+          # runtime spawnt. Upstream-bron = zelfde naam:tag onder docker.io/vexaai.
+          images=$(docker compose -f docker-compose.yml config --format json \
+            | jq -r '([.services[].image] + [.services.runtime.environment.BROWSER_IMAGE]) | .[]' \
+            | grep '^ghcr\.io/' | sort -u)
+          echo "Te mirroren:"; echo "$images"
+          for img in $images; do
+            src="docker.io/vexaai/${img##*/vexa-stack/}"
+            echo "→ $src ⇒ $img"
+            docker buildx imagetools create --tag "$img" "$src"
+          done
+
+  deploy:
+    needs: mirror
+    runs-on: [ecom]
+    steps:
+      - name: Trigger Dokploy redeploy
+        env:
+          DOKPLOY_WEBHOOK_URL: ${{ secrets.DOKPLOY_WEBHOOK_URL }}
+        run: |
+          : "${DOKPLOY_WEBHOOK_URL:?repo-secret DOKPLOY_WEBHOOK_URL ontbreekt}"
+          curl -fsS --max-time 60 "$DOKPLOY_WEBHOOK_URL"

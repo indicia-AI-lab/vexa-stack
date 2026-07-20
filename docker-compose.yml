@@ -87,9 +87,14 @@ services:
       - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY:-vexa-secret-key}
     networks: [vexa]
 
-  # ─── Kerndiensten (gepubliceerde images, gepind via IMAGE_TAG) ──────────────
+  # ─── Kerndiensten ───────────────────────────────────────────────────────────
+  # Productie pullt uit onze GHCR-mirror (CI kopieert de gepinde upstream-images
+  # bij elke release-tag — zie .github/workflows/deploy.yml). De versie is HIER
+  # gepind, in de ${IMAGE_TAG:-…}-defaults; bump = alle defaults in dit bestand
+  # tegelijk (sed), niet via panel-env. VEXA_REGISTRY=docker.io/vexaai als
+  # override om rechtstreeks upstream te draaien (lokale test).
   admin-api:
-    image: vexaai/v012-admin-api:${IMAGE_TAG:?pin IMAGE_TAG in .env}
+    image: ${VEXA_REGISTRY:-ghcr.io/indicia-ai-lab/vexa-stack}/v012-admin-api:${IMAGE_TAG:-v0.12.15}
     ports:
       - "127.0.0.1:${ADMIN_API_PORT:-18057}:8001"
     environment:
@@ -115,7 +120,7 @@ services:
     restart: unless-stopped
 
   runtime:
-    image: vexaai/v012-runtime:${IMAGE_TAG:?pin IMAGE_TAG in .env}
+    image: ${VEXA_REGISTRY:-ghcr.io/indicia-ai-lab/vexa-stack}/v012-runtime:${IMAGE_TAG:-v0.12.15}
     # Spawnt bot-containers via de host-docker-socket. Let op: socket-toegang is
     # root-equivalent op de host — zie de risico-paragraaf in de README.
     group_add:
@@ -123,11 +128,15 @@ services:
     ports:
       - "127.0.0.1:${RUNTIME_API_PORT:-18090}:8090"
     environment:
-      - BROWSER_IMAGE=${BROWSER_IMAGE:?pin BROWSER_IMAGE in .env}
-      # Agent-workers gebruiken we niet (geen agent-api in deze stack); gepind
-      # zodat de runtime nooit op een zwevende :dev-tag terugvalt.
-      - AGENT_IMAGE=vexaai/v012-agent-api:${IMAGE_TAG}
-      - AGENT_WORKER_IMAGE=vexaai/v012-agent-worker:${IMAGE_TAG}
+      # LET OP: de bot wordt door de runtime via de docker-socket gepulld, dus
+      # de host-daemon moet dit image zonder credentials kunnen pullen — de
+      # GHCR-packages moeten public staan (zie README).
+      - BROWSER_IMAGE=${BROWSER_IMAGE:-${VEXA_REGISTRY:-ghcr.io/indicia-ai-lab/vexa-stack}/vexa-bot:${IMAGE_TAG:-v0.12.15}}
+      # Agent-workers gebruiken we niet (geen agent-api in deze stack); expliciet
+      # op upstream gepind (niet gemirrord) zodat de runtime nooit op een
+      # zwevende :dev-tag terugvalt.
+      - AGENT_IMAGE=docker.io/vexaai/v012-agent-api:${IMAGE_TAG:-v0.12.15}
+      - AGENT_WORKER_IMAGE=docker.io/vexaai/v012-agent-worker:${IMAGE_TAG:-v0.12.15}
       - REDIS_URL=redis://redis:6379/0
       - INTERNAL_API_SECRET=${INTERNAL_API_SECRET}
       - LOG_LEVEL=${LOG_LEVEL:-info}
@@ -150,7 +159,7 @@ services:
     restart: unless-stopped
 
   meeting-api:
-    image: vexaai/v012-meeting-api:${IMAGE_TAG:?pin IMAGE_TAG in .env}
+    image: ${VEXA_REGISTRY:-ghcr.io/indicia-ai-lab/vexa-stack}/v012-meeting-api:${IMAGE_TAG:-v0.12.15}
     ports:
       - "127.0.0.1:${MEETING_API_PORT:-18080}:8080"
     environment:
@@ -203,7 +212,7 @@ services:
     restart: unless-stopped
 
   gateway:
-    image: vexaai/v012-gateway:${IMAGE_TAG:?pin IMAGE_TAG in .env}
+    image: ${VEXA_REGISTRY:-ghcr.io/indicia-ai-lab/vexa-stack}/v012-gateway:${IMAGE_TAG:-v0.12.15}
     ports:
       - "127.0.0.1:${API_GATEWAY_HOST_PORT:-18056}:8000"
     environment:

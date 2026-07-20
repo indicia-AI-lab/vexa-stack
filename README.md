@@ -32,34 +32,54 @@ upstream: transcriptie, agent-api/agent-worker, mcp, terminal, dashboard.
 Alles bindt op 127.0.0.1 — er is bewust géén publieke ingang; Vector
 draait op dezelfde host en bereikt de gateway via localhost.
 
-## Eerste deploy
+## Deploy (Dokploy Compose + CI/CD)
 
-1. `cp .env.example .env` en vul de secrets (`openssl rand -hex 32`).
-   Check `DOCKER_GID` (`getent group docker | cut -d: -f3`) en of de
-   host-poorten vrij zijn (`ss -tlnp | grep -E '18056|18057|18080|18090|5458|9000|9001'`).
-2. `docker compose pull && docker compose up -d` — alle services hebben
-   healthchecks; `docker compose ps` moet overal `healthy` tonen.
-3. Mint de API-key voor Vector (idempotent, max 3 gelijktijdige bots
+De stack draait als **Compose**-service in de Dokploy-organisatie
+**Indicia AI**, met de standaard tag-pipeline (kennisbank
+`dokploy-deploy`) in aangepaste vorm — er wordt niets gebouwd:
+
+```
+git tag X.Y.Z (op main) → checks (compose-validatie, tag-guard)
+  → mirror (gepinde upstream-images → ghcr.io/indicia-ai-lab/vexa-stack/*)
+  → deploy (ecom-runner → Dokploy-webhook → compose-redeploy)
+```
+
+- **Versie bumpen**: pas de `${IMAGE_TAG:-…}`-defaults in
+  `docker-compose.yml` aan (alle tegelijk), commit op main, tag `X.Y.Z`.
+  De mirror-job kopieert manifest-voor-manifest (`docker buildx
+  imagetools create`), dus geen rebuild en identieke digests.
+- **GHCR-packages moeten public staan** (eenmalig na de eerste
+  mirror-run, per package: Package settings → Danger zone → public).
+  Niet alleen voor Dokploy: het **bot-image wordt door de runtime via
+  de host-docker-socket gepulld**, buiten Dokploy's registry-auth om —
+  een private package breekt dus pas bij de eerste bot-spawn, niet bij
+  de deploy.
+- **Panel-env** (Dokploy → service → Environment): de waarden uit
+  `.env.example` — secrets, poorten, `DOCKER_GID` (986 op de ecom-VPS).
+  Géén `IMAGE_TAG`/`BROWSER_IMAGE` in het panel zetten; de versie is
+  in de compose gepind zodat CI en runtime nooit uiteenlopen.
+- Zet Dokploy's **auto-deploy on push uit** — deploys zijn tag-gedreven
+  via de webhook (repo-secret `DOKPLOY_WEBHOOK_URL`, uit het
+  webhook-veld van de Compose-service).
+
+Na de eerste succesvolle deploy, op de VPS:
+
+1. API-key voor Vector minten (idempotent, max 3 gelijktijdige bots
    conform ADR-0004):
 
    ```sh
-   ADMIN_TOKEN=<uit .env> EMAIL=vector@indicia.nl MAX_BOTS=3 bin/provision-token
+   ADMIN_TOKEN=<panel-env> EMAIL=vector@indicia.nl MAX_BOTS=3 bin/provision-token
    ```
 
-   De output (`vxa_…`) is de `X-API-Key` die in Vector's env gaat
-   (`VEXA_API_KEY`). Token kwijt? Gewoon opnieuw draaien — tokens zijn
-   additief.
-4. Rooktest zonder echte meeting: `curl -s http://127.0.0.1:18056/health`
-   en `curl -s -H "X-API-Key: vxa_…" http://127.0.0.1:18056/bots` (lege
-   lijst = goed).
+   De output (`vxa_…`) is de `X-API-Key` voor Vector's env
+   (`VEXA_API_KEY`). Token kwijt? Opnieuw draaien — tokens zijn additief.
+2. Rooktest zonder echte meeting: `curl -s http://127.0.0.1:18056/health`
+   en `curl -s -H "X-API-Key: vxa_…" http://127.0.0.1:18056/bots`
+   (lege lijst = goed).
 
-In Dokploy: aanmaken als **Compose**-app in de organisatie **Indicia
-AI**, gekoppeld aan deze repo. Kies één deploy-methode (Dokploy óf
-handmatig `docker compose`) en blijf daarbij: de volumes krijgen een
-prefix van de compose-projectnaam, dus wisselen van methode betekent
-"lege" nieuwe volumes terwijl de oude data onder de vorige naam blijft
-staan. (Het bot-netwerk heeft hier geen last van — dat heet altijd
-`vexa-stack`.)
+Lokaal draaien kan met `cp .env.example .env` (secrets invullen, evt.
+`VEXA_REGISTRY=docker.io/vexaai` om rechtstreeks upstream te pullen) en
+`docker compose up -d`.
 
 ## Gebruik (de API die Vector aanroept)
 
@@ -104,10 +124,10 @@ zelf bots aan via `POST /bots`.
 ## Upgraden
 
 1. Upstream release bekijken (changelog + issues rond Teams-join).
-2. `IMAGE_TAG` en `BROWSER_IMAGE` in `.env` naar de nieuwe tag,
-   `docker compose pull && docker compose up -d`.
-3. Rooktest (stap 4 hierboven) + één echte proefmeeting.
-4. Rollback = tags terugzetten en opnieuw `up -d`.
+2. `${IMAGE_TAG:-…}`-defaults in `docker-compose.yml` naar de nieuwe
+   tag, commit op main, `git tag X.Y.Z && git push origin X.Y.Z`.
+3. Rooktest (zie Deploy) + één echte proefmeeting.
+4. Rollback = de vorige defaults terugzetten en opnieuw taggen.
 
 **Pin altijd een `vX.Y.Z`-tag, nooit de rolling `v012`-tag** — die
 schuift stilletjes mee met upstream. Bekend breekpatroon: Microsoft
@@ -133,7 +153,11 @@ zelf te patchen.
 ## Bestanden
 
 - `docker-compose.yml` — de stack (afgeleid van upstream v0.12.15; de
-  afwijkingen staan in de kopcommentaar)
-- `.env.example` — invulsjabloon; `.env` staat in `.gitignore`
+  afwijkingen staan in de kopcommentaar); hier is óók de versie gepind
+- `.env.example` — invulsjabloon voor panel-env / lokaal; `.env` staat
+  in `.gitignore`
+- `.github/workflows/ci.yml` — compose-validatie op elke push/PR
+- `.github/workflows/deploy.yml` — tag-pipeline: checks → GHCR-mirror →
+  Dokploy-webhook
 - `bin/provision-token` — gevendorde upstream-helper (v0.12.15) om
   idempotent een user + API-key te minten
