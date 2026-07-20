@@ -44,22 +44,24 @@ git tag X.Y.Z (op main) → checks (compose-validatie, tag-guard)
   → deploy (ecom-runner → Dokploy-webhook → compose-redeploy)
 ```
 
-- **Provider = Raw compose**: de Dokploy-service draait op een gepláákte
-  kopie van `docker-compose.yml` (de GitHub-App-integratie is hier niet
-  beschikbaar). De repo blijft de bron van waarheid; het panel houdt
-  een kopie.
+- **Provider**: de repo is public — gebruik in de Compose-service bij
+  voorkeur de generieke **Git-provider** (`https://github.com/indicia-AI-lab/vexa-stack.git`,
+  branch `main`, pad `./docker-compose.yml`, geen credentials nodig);
+  de GitHub-App-integratie is op deze Dokploy niet beschikbaar.
+  Fallback is **Raw compose** (compose-inhoud plakken) — dan is het
+  panel een kopie en hoort elke compose-wijziging óók daar geplakt.
 - **Versie bumpen**: pas de `${IMAGE_TAG:-…}`-defaults in
-  `docker-compose.yml` aan (alle tegelijk), commit op main, **plak de
-  nieuwe compose óók in de Dokploy-service** (Raw-veld), en tag dan
-  `X.Y.Z`. Zonder de re-paste deployt de webhook de oude gepinde
-  versie. De mirror-job kopieert manifest-voor-manifest (`docker buildx
-  imagetools create`), dus geen rebuild en identieke digests.
-- **GHCR-packages moeten public staan** (eenmalig na de eerste
-  mirror-run, per package: Package settings → Danger zone → public).
-  Niet alleen voor Dokploy: het **bot-image wordt door de runtime via
-  de host-docker-socket gepulld**, buiten Dokploy's registry-auth om —
-  een private package breekt dus pas bij de eerste bot-spawn, niet bij
-  de deploy.
+  `docker-compose.yml` aan (alle tegelijk), commit op main, en tag
+  `X.Y.Z` (bij Raw-provider: eerst de nieuwe compose in het panel
+  plakken, anders deployt de webhook de oude versie). De mirror-job
+  kopieert manifest-voor-manifest (`docker buildx imagetools create`),
+  dus geen rebuild en identieke digests.
+- **GHCR-packages blijven private** — Dokploy pullt de vier
+  service-images met zijn registry-login. Het **bot-image** is de
+  uitzondering: dat pullt de runtime via de host-docker-socket, buiten
+  elke registry-login om, en komt daarom rechtstreeks van het publieke
+  Docker Hub-upstream (`docker.io/vexaai/vexa-bot`) in plaats van uit
+  de mirror.
 - **Panel-env** (Dokploy → service → Environment): de waarden uit
   `.env.example` — secrets, poorten, `DOCKER_GID` (986 op de ecom-VPS).
   Géén `IMAGE_TAG`/`BROWSER_IMAGE` in het panel zetten; de versie is

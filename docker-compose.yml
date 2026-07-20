@@ -128,10 +128,11 @@ services:
     ports:
       - "127.0.0.1:${RUNTIME_API_PORT:-18090}:8090"
     environment:
-      # LET OP: de bot wordt door de runtime via de docker-socket gepulld, dus
-      # de host-daemon moet dit image zonder credentials kunnen pullen — de
-      # GHCR-packages moeten public staan (zie README).
-      - BROWSER_IMAGE=${BROWSER_IMAGE:-${VEXA_REGISTRY:-ghcr.io/indicia-ai-lab/vexa-stack}/vexa-bot:${IMAGE_TAG:-v0.12.15}}
+      # De bot wordt door de runtime via de host-docker-socket gepulld — dus
+      # BUITEN Dokploy's registry-login om (anonieme daemon-pull). Daarom komt
+      # het bot-image rechtstreeks van het publieke Docker Hub-upstream, niet
+      # uit onze private GHCR-mirror (org staat geen public packages toe).
+      - BROWSER_IMAGE=${BROWSER_IMAGE:-docker.io/vexaai/vexa-bot:${IMAGE_TAG:-v0.12.15}}
       # Agent-workers gebruiken we niet (geen agent-api in deze stack); expliciet
       # op upstream gepind (niet gemirrord) zodat de runtime nooit op een
       # zwevende :dev-tag terugvalt.

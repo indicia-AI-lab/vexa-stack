@@ -52,8 +52,9 @@ jobs:
         run: |
           set -euo pipefail
           # De te mirroren images komen uit de compose-config zelf (single source
-          # of truth): alle ghcr.io-refs van services + het bot-image dat de
-          # runtime spawnt. Upstream-bron = zelfde naam:tag onder docker.io/vexaai.
+          # of truth): alle ghcr.io-refs. Het bot-image valt hier bewust buiten —
+          # dat pullt de host-daemon anoniem van Docker Hub (zie compose-comment).
+          # Upstream-bron = zelfde naam:tag onder docker.io/vexaai.
           images=$(docker compose -f docker-compose.yml config --format json \
             | jq -r '([.services[].image] + [.services.runtime.environment.BROWSER_IMAGE]) | .[]' \
             | grep '^ghcr\.io/' | sort -u)
