@@ -44,9 +44,15 @@ git tag X.Y.Z (op main) → checks (compose-validatie, tag-guard)
   → deploy (ecom-runner → Dokploy-webhook → compose-redeploy)
 ```
 
+- **Provider = Raw compose**: de Dokploy-service draait op een gepláákte
+  kopie van `docker-compose.yml` (de GitHub-App-integratie is hier niet
+  beschikbaar). De repo blijft de bron van waarheid; het panel houdt
+  een kopie.
 - **Versie bumpen**: pas de `${IMAGE_TAG:-…}`-defaults in
-  `docker-compose.yml` aan (alle tegelijk), commit op main, tag `X.Y.Z`.
-  De mirror-job kopieert manifest-voor-manifest (`docker buildx
+  `docker-compose.yml` aan (alle tegelijk), commit op main, **plak de
+  nieuwe compose óók in de Dokploy-service** (Raw-veld), en tag dan
+  `X.Y.Z`. Zonder de re-paste deployt de webhook de oude gepinde
+  versie. De mirror-job kopieert manifest-voor-manifest (`docker buildx
   imagetools create`), dus geen rebuild en identieke digests.
 - **GHCR-packages moeten public staan** (eenmalig na de eerste
   mirror-run, per package: Package settings → Danger zone → public).
